@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using Windows.Devices.Bluetooth;
@@ -163,6 +164,7 @@ class Popup : Form
 static class Program
 {
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run", AppName = "AirPodsPopup";
+    [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr h, nint min, nint max);
 
     [STAThread]
     static int Main(string[] args)
@@ -231,6 +233,11 @@ static class Program
                 await Task.Delay(30000);
             }
         });
+
+        // Idle tray app: periodically give back resident pages so Task Manager shows a small number. Pages fault back in on demand.
+        using var trim = new System.Windows.Forms.Timer { Interval = 30000 };
+        trim.Tick += (_, _) => SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, -1, -1);
+        trim.Start();
 
         Application.Run();
         watcher.Stop(); tray.Visible = false; watched?.Dispose();

@@ -12,7 +12,8 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- compression unpacks the exe into RAM at launch: 54 MB vs 17.5 MB private memory (measured), but 69 MB vs 163 MB file -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <DebugType>none</DebugType>
   </PropertyGroup>
