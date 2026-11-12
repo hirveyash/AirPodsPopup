@@ -9,6 +9,7 @@ A tiny tray app that shows a Mac-style popup (model, battery, **Connect** button
 1. Pair your AirPods with Windows once (Settings > Bluetooth & devices).
 2. Download `AirPodsPopup.exe` from [Releases](../../releases) and run it.
 3. Open the case lid near your PC. The popup appears; click **Connect**.
+4. Put the AirPods back in the case and you get a Windows notification that they disconnected.
 
 Windows SmartScreen may warn about an unknown publisher because the exe is not code-signed. Choose "More info" > "Run anyway", or build it yourself.
 

@@ -16,7 +16,7 @@ static class Parser
         string model = d[3] switch
         {
             0x02 => "AirPods", 0x0F => "AirPods 2", 0x13 => "AirPods 3", 0x0E => "AirPods Pro",
-            0x14 => "AirPods Pro 2", 0x24 => "AirPods Pro 2", 0x0A => "AirPods Max", _ => "AirPods"
+            0x14 => "AirPods Pro 2", 0x24 => "AirPods Pro 2", 0x27 => "AirPods Pro 3", 0x0A => "AirPods Max", _ => "AirPods"
         };
         bool flip = (d[5] & 0x20) == 0;
         int hi = d[6] >> 4, lo = d[6] & 0xF;
@@ -37,7 +37,8 @@ static class Bt
     [DllImport("bthprops.cpl", SetLastError = true)]
     static extern uint BluetoothSetServiceState(IntPtr radio, ref DEVICE_INFO info, ref Guid service, uint flags);
 
-    static readonly Guid[] Services = { new("0000110b-0000-1000-8000-00805f9b34fb"), new("0000111e-0000-1000-8000-00805f9b34fb") }; // A2DP sink, Handsfree
+    // A2DP sink only. Enabling Handsfree too made Windows pick the low-quality, quiet call profile as the output.
+    static readonly Guid[] Services = { new("0000110b-0000-1000-8000-00805f9b34fb") };
 
     // Paired device whose name contains "AirPods"; prefers one that is already connected.
     public static async Task<(ulong addr, bool connected)?> FindAsync()
@@ -56,16 +57,22 @@ static class Bt
     }
 
     // Windows has no "connect" API; toggling the audio services makes it (re)connect the paired device.
+    public static async Task<bool> IsConnectedAsync(ulong addr)
+    {
+        using var dev = await BluetoothDevice.FromBluetoothAddressAsync(addr);
+        return dev?.ConnectionStatus == BluetoothConnectionStatus.Connected;
+    }
+
     public static async Task<bool> ConnectAsync(ulong addr)
     {
         var info = new DEVICE_INFO { dwSize = (uint)Marshal.SizeOf<DEVICE_INFO>(), Address = addr, Name = "" };
-        foreach (var g in Services) { var s = g; BluetoothSetServiceState(IntPtr.Zero, ref info, ref s, 0); }
-        foreach (var g in Services) { var s = g; BluetoothSetServiceState(IntPtr.Zero, ref info, ref s, 1); }
-        for (int i = 0; i < 16; i++)
+        void Set(uint flag) { foreach (var g in Services) { var s = g; BluetoothSetServiceState(IntPtr.Zero, ref info, ref s, flag); } }
+        Set(1); // fast path: just enable
+        for (int i = 0; i < 40; i++)
         {
-            await Task.Delay(500);
-            using var dev = await BluetoothDevice.FromBluetoothAddressAsync(addr);
-            if (dev?.ConnectionStatus == BluetoothConnectionStatus.Connected) return true;
+            if (i == 12) { Set(0); Set(1); } // slow path after ~3 s: toggle to force a reconnect
+            await Task.Delay(250);
+            if (await IsConnectedAsync(addr)) return true;
         }
         return false;
     }
@@ -109,29 +116,47 @@ class Popup : Form
             Location = new Point(wa.Right - Width - 16, wa.Bottom - Height - 16);
             Show();
             _ = RefreshStatus();
+            hide.Stop(); hide.Start(); // timer starts only on first show; later ads just refresh the text
         }
-        hide.Stop(); hide.Start();
     }
 
+    // Polls while the popup is up: Windows' connection state lags a few seconds behind the case lid.
     async Task RefreshStatus()
     {
         btn.Enabled = false; btn.Text = "Checking...";
-        try
+        while (Visible)
         {
-            var f = await Bt.FindAsync();
-            if (f is null) { btn.Text = "Pair AirPods in Windows first"; return; }
-            addr = f.Value.addr;
-            btn.Text = f.Value.connected ? "Connected" : "Connect"; btn.Enabled = !f.Value.connected;
+            try
+            {
+                if (busy) { await Task.Delay(1000); continue; }
+                if (addr == 0)
+                {
+                    var f = await Bt.FindAsync();
+                    if (f is null) { btn.Text = "Pair AirPods in Windows first"; return; }
+                    addr = f.Value.addr;
+                }
+                var c = await Bt.IsConnectedAsync(addr);
+                if (!busy) { btn.Text = c ? "Connected" : "Connect"; btn.Enabled = !c; }
+            }
+            catch { btn.Text = "Bluetooth unavailable"; return; }
+            await Task.Delay(1000);
         }
-        catch { btn.Text = "Bluetooth unavailable"; }
     }
 
     async Task ConnectAsync()
     {
-        busy = true; btn.Enabled = false; btn.Text = "Connecting...";
+        busy = true; hide.Stop(); btn.Enabled = false; btn.Text = "Connecting...";
         try { var ok = await Bt.ConnectAsync(addr); btn.Text = ok ? "Connected" : "Couldn't connect - retry"; btn.Enabled = !ok; }
         catch { btn.Text = "Couldn't connect - retry"; btn.Enabled = true; }
         busy = false;
+        hide.Interval = 4000; hide.Start(); // linger briefly so the result is seen
+    }
+
+    // Reset to the default delay for the next showing.
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (!Visible) hide.Interval = 8000;
     }
 }
 
@@ -150,6 +175,7 @@ static class Program
         var ui = new WindowsFormsSynchronizationContext();
         var popup = new Popup(); _ = popup.Handle; // create handle so we can marshal onto the UI thread
         DateTime last = DateTime.MinValue;
+        var debug = args.Contains("--debug"); // logs raw ads to %TEMP%\airpods-debug.log
 
         var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Passive };
         watcher.AdvertisementFilter.Advertisement.ManufacturerData.Add(new BluetoothLEManufacturerData { CompanyId = 0x004C });
@@ -158,11 +184,15 @@ static class Program
             foreach (var m in a.Advertisement.ManufacturerData)
             {
                 var d = new byte[m.Data.Length]; DataReader.FromBuffer(m.Data).ReadBytes(d);
+                if (debug) File.AppendAllText(Path.Combine(Path.GetTempPath(), "airpods-debug.log"),
+                    $"{DateTime.Now:HH:mm:ss.fff} addr={a.BluetoothAddress:X12} rssi={a.RawSignalStrengthInDBm} {Convert.ToHexString(d)}\n");
                 if (Parser.Parse(d) is not { } p) continue;
-                var near = a.RawSignalStrengthInDBm >= -70; // ignore someone else's AirPods across the room
+                // shortcut: signal strength is the only "is it mine" test (AirPods rotate their address every few seconds); neighbours measured <= -60 dBm, mine -22..-38. Upgrade if a 2nd pair sits within ~30 cm.
+                if (a.RawSignalStrengthInDBm < -50) continue;
                 var fresh = DateTime.UtcNow - last > TimeSpan.FromSeconds(15);
-                if (near) last = DateTime.UtcNow;
-                if (near && (fresh || popup.Visible)) ui.Post(_ => popup.ShowPods(p), null);
+                last = DateTime.UtcNow;
+                // Case battery reads "unknown" when the buds are out of the case (in ears), so only a case-open event can trigger.
+                if (popup.Visible || (fresh && p.Case != null)) ui.Post(_ => popup.ShowPods(p), null);
             }
         };
         watcher.Start();
@@ -178,8 +208,32 @@ static class Program
         menu.Items.Add("Exit", null, (_, _) => Application.Exit());
         using var tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "AirPods Popup", ContextMenuStrip = menu, Visible = true };
 
+        // Notify when the paired AirPods disconnect (e.g. put back in the case). Retries until a paired pair exists.
+        BluetoothDevice? watched = null;
+        _ = Task.Run(async () =>
+        {
+            while (watched == null)
+            {
+                try
+                {
+                    if (await Bt.FindAsync() is { } f && await BluetoothDevice.FromBluetoothAddressAsync(f.addr) is { } dev)
+                    {
+                        dev.ConnectionStatusChanged += (s, _) =>
+                        {
+                            if (s.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
+                                ui.Post(_ => tray.ShowBalloonTip(3000, "AirPods", $"{s.Name} disconnected", ToolTipIcon.None), null);
+                        };
+                        watched = dev; // keep a reference so the event keeps firing
+                        break;
+                    }
+                }
+                catch { }
+                await Task.Delay(30000);
+            }
+        });
+
         Application.Run();
-        watcher.Stop(); tray.Visible = false;
+        watcher.Stop(); tray.Visible = false; watched?.Dispose();
         return 0;
     }
 
@@ -187,7 +241,9 @@ static class Program
     static int SelfTest()
     {
         var p = Parser.Parse(new byte[] { 0x07, 0x19, 0x01, 0x0E, 0x20, 0x20, 0x8A, 0x05, 0, 0 });
-        var ok = p == new Pods("AirPods Pro", 100, 80, 50, false) && Parser.Parse(new byte[] { 1, 2 }) == null;
+        var real = Parser.Parse(Convert.FromHexString("071901272024A7DA5100")); // captured from a real AirPods Pro 3
+        var ok = p == new Pods("AirPods Pro", 100, 80, 50, false) && real == new Pods("AirPods Pro 3", 70, 100, 100, true)
+            && Parser.Parse(new byte[] { 1, 2 }) == null;
         Console.Error.WriteLine(ok ? "selftest ok" : $"selftest FAILED: {p}");
         return ok ? 0 : 1;
     }
