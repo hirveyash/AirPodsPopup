@@ -208,7 +208,7 @@ static class Program
         };
         menu.Items.Add(auto);
         menu.Items.Add("Exit", null, (_, _) => Application.Exit());
-        using var tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "AirPods Popup", ContextMenuStrip = menu, Visible = true };
+        using var tray = new NotifyIcon { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? SystemIcons.Application, Text = "AirPods Popup", ContextMenuStrip = menu, Visible = true };
 
         // Notify when the paired AirPods disconnect (e.g. put back in the case). Retries until a paired pair exists.
         BluetoothDevice? watched = null;
